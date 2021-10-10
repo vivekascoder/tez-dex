@@ -5,6 +5,7 @@ import { TezosToolkit } from "@taquito/taquito";
 import { BeaconWallet } from "@taquito/beacon-wallet";
 // import { OpKind, MANAGER_LAMBDA } from "@taquito/taquito";
 import CONFIG from "./config.js";
+import axios from "axios";
 
 const btnClass = `px-4 py-2 text-xs uppercase font-semibold bg-purple-500 text-white rounded-sm hover:bg-purple-600`;
 
@@ -28,12 +29,64 @@ function Notification({ error, setError }) {
   );
 }
 
+function Balances({catToken, lpToken}) {
+  return (
+    <div className="bg-gray-100 shadow-sm flex items-center justify-center p-4 mb-20 space-x-10">
+      <span className="font-semibold text-sm">🐱 Cat Token: {catToken}</span>
+      <span className="font-semibold text-sm">💦 LP Token: {lpToken}</span>
+    </div>
+  );
+}
+
 function App() {
   const [tezos, setTezos] = useState(null);
   const [wallet, setWallet] = useState(null);
   const [error, setError] = useState("");
+
+  // For the input boxes.
   const [swapXtzAmount, setSwapXtzAmount] = useState(0);
   const [swapTokenAmount, setSwapTokenAmount] = useState(0);
+  const [liquidityXtz, setLiquidityXtz] = useState(0);
+  const [lpToBurn, setLpToBurn] = useState(0);
+
+  // For showing th balnces.
+  const [lpBalance, setLpBalance] = useState(0);
+  const [catBalance, setCatBalance] = useState(0);
+
+  async function getBalance(userAddress, bigmapId) {
+    const {data} = await axios.get(`https://api.granadanet.tzkt.io/v1/bigmaps/${bigmapId}/keys`);
+    const requiredEl = data.find((el) => {
+      return el.key === userAddress;
+    })
+    if (requiredEl) {
+      return parseInt(requiredEl.value.balance);
+    } else {
+      return 0;
+    }
+  }
+  async function updateBalances() {
+    if (tezos) {
+      const cat = await getBalance(
+        wallet,
+        CONFIG.tokenBalanceBigMapId
+      );
+      setCatBalance(cat);
+
+      const lp = await getBalance(
+        wallet,
+        CONFIG.lpBalanceBigMapId
+      );
+      setLpBalance(lp);
+      console.log({cat, lp})
+    }
+  }
+  useEffect( () => {
+    async function runUseEffect () {
+      await updateBalances()
+      console.log('updates')
+    }
+    runUseEffect();
+  }, [wallet])
 
   async function connectToWallet() {
     if (!tezos) {
@@ -86,6 +139,8 @@ function App() {
         const batchOp = await batch.send();
         console.log("Operation hash:", batchOp.hash);
         setError(`Operation Hash: ${batchOp.hash}`)
+
+        await updateBalances();
       } 
       else {
         setError(`Not a valid Value.`)
@@ -93,6 +148,47 @@ function App() {
     } catch(err) {
       setError(err.message)
     }
+  }
+
+  async function addLiquidity() {
+    // Add the liquidity into the dex.
+    const dexContract = await tezos.wallet.at(CONFIG.dexAddress);
+    const tokenContract = await tezos.wallet.at(CONFIG.tokenAddress);
+    
+    const xtz = parseInt(liquidityXtz * 10 ** 6);
+    const storage = await dexContract.storage();
+    const tezpool = storage['tez_pool'].toNumber();
+    const tokenPool = storage['token_pool'].toNumber();
+    const tokenNeeded = parseInt(xtz * tokenPool / tezpool);
+    
+    const op = await tokenContract.methods.approve(
+      CONFIG.dexAddress,
+      tokenNeeded
+    ).send();
+    setError(`Operation Hash: ${op.opHash}`)
+    const result = await op.confirmation();
+    console.log(result);
+
+    // Interacting with the entry_point
+    const anotherOp = await dexContract.methods.invest_liquidity().send({amount: xtz, mutez: true});
+    setError(`Operation Hash: ${anotherOp.opHash}`)
+    const anotherResult = await anotherOp.confirmation();
+    console.log(anotherResult);
+
+    await updateBalances();
+  }
+
+  async function removeLiquidity() {
+    const lp = parseInt(lpToBurn * 10 ** 6);
+    const dexContract = await tezos.wallet.at(CONFIG.dexAddress);
+
+    // Remove the liquidity from the dex based on the amount of the LP Token burn.
+    const op = await dexContract.methods.divest_liquidity(lp).send();
+    setError(`Operation Hash: ${op.opHash}`)
+    const result = await op.confirmation();
+    console.log(result);
+    
+    await updateBalances();
   }
 
   return (
@@ -109,6 +205,10 @@ function App() {
         </div>
       </nav>
 
+      <Balances 
+        catToken={catBalance / CONFIG.tokenDecimals}
+        lpToken={lpBalance / CONFIG.lpDecimals}
+      />
       <div className="m-2 p-4 bg-gray-200">
         <p className="text-xs text-gray-500">⚔️ Tez Dex / Exchange</p>
         <form
@@ -144,13 +244,15 @@ function App() {
 
       <div className="m-2 p-4 bg-gray-200">
         <p className="text-xs text-gray-500">⚔️ Tez Dex / Add Liquidity</p>
-        <form className="space-y-4 mt-4">
+        <form className="space-y-4 mt-4" onSubmit={(e) => {e.preventDefault(); addLiquidity();}}>
           <div className="flex space-x-2">
             <input
               type="number"
               placeholder="Amount of XTZ"
               name="tez"
               className="text-sm w-full flex-1"
+              value={liquidityXtz} 
+              onChange={(e) => {setLiquidityXtz(e.target.value)}}
             />
             <button className={btnClass}>💦 Add</button>
           </div>
@@ -159,13 +261,15 @@ function App() {
 
       <div className="m-2 p-4 bg-gray-200">
         <p className="text-xs text-gray-500">⚔️ Tez Dex / Remove Liquidity</p>
-        <form className="space-y-4 mt-4">
+        <form className="space-y-4 mt-4" onSubmit={(e) => {e.preventDefault(); removeLiquidity();}}>
           <div className="flex space-x-2">
             <input
               type="number"
               placeholder="Amount of LP Tokens to burn"
               name="tez"
               className="text-sm w-full flex-1"
+              value={lpToBurn} 
+              onChange={(e) => {setLpToBurn(e.target.value)}}
             />
             <button className={btnClass}>🔥 Remove</button>
           </div>
